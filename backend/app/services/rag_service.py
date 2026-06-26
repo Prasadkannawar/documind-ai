@@ -149,7 +149,7 @@ async def query(request: QueryRequest) -> QueryResponse:
                 content=chunk["content"],
                 chunk_index=chunk.get("chunk_index", i),
                 page_number=chunk.get("page_number"),
-                similarity_score=round(float(chunk.get("similarity", 0.0)), 4),
+                similarity_score=round(min(1.0, float(chunk.get("similarity", 0.0))), 4),
                 relevance_label=_relevance_label(float(chunk.get("similarity", 0.0))),
                 attribution_weight=attribution_weights[i] if i < len(attribution_weights) else 0.0,
                 extracted_span=extracted_spans[i] if i < len(extracted_spans) else None,

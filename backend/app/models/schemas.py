@@ -7,7 +7,7 @@ from datetime import datetime
 
 class TokenImportance(BaseModel):
     token: str
-    importance: float = Field(ge=0.0, le=1.0, description="0=irrelevant, 1=critical for retrieval")
+    importance: float = Field(ge=0.0, description="raw drop in similarity when token removed")
     normalized_importance: float = Field(ge=0.0, le=1.0)
 
 
