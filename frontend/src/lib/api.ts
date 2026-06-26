@@ -31,7 +31,7 @@ export const documindApi = {
     api.post("/api/v1/query/", {
       question,
       conversation_history: history || [],
-    }).then((r) => r.data),
+    }, { timeout: 180000 }).then((r) => r.data),
 
   queryHistory: (limit = 20): Promise<QueryResponse[]> =>
     api.get(`/api/v1/query/history?limit=${limit}`).then((r) => r.data),
