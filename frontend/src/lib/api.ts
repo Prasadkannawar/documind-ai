@@ -3,7 +3,7 @@ import type { QueryResponse, DocumentItem, HealthStatus, AnalyticsData } from "@
 
 const api = axios.create({
   baseURL: process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000",
-  timeout: 60000,
+  timeout: 180000,
 });
 
 export const documindApi = {
