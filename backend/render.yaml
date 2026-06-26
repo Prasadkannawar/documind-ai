@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: documind-backend
+    runtime: python
+    region: oregon
+    plan: starter           # free tier (512MB RAM, enough for BGE-small + tinyRoberta)
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: SUPABASE_URL
+        sync: false         # set manually in Render dashboard
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: FRONTEND_URL
+        sync: false         # your Vercel URL, e.g. https://documind.vercel.app
+      - key: PYTHON_VERSION
+        value: "3.11.0"
