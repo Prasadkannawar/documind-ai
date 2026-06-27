@@ -2,13 +2,13 @@
 Supabase service — all queries are scoped to a session_id for data isolation.
 """
 import logging
-from typing import List, Optional, Dict
-from supabase import create_client, Client
+from typing import List, Dict, Any, Optional
+from supabase import create_client
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-_client: Client | None = None
+_client: Any = None
 
 
 def get_client() -> Client:
