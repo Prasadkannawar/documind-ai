@@ -1,9 +1,17 @@
 import axios from "axios";
 import type { QueryResponse, DocumentItem, HealthStatus, AnalyticsData } from "@/types";
+import { getOrCreateSessionId } from "./session";
 
 const api = axios.create({
   baseURL: process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000",
   timeout: 180000,
+});
+
+// Attach session ID to every request so data is device-isolated
+api.interceptors.request.use((config) => {
+  const sessionId = getOrCreateSessionId();
+  config.headers["X-Session-ID"] = sessionId;
+  return config;
 });
 
 export const documindApi = {

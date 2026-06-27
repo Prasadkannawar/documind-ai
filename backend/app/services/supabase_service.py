@@ -1,9 +1,8 @@
 """
-Supabase service — handles both regular tables and pgvector similarity search.
+Supabase service — all queries are scoped to a session_id for data isolation.
 """
 import logging
-import json
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict
 from supabase import create_client, Client
 from app.core.config import settings
 
@@ -21,13 +20,13 @@ def get_client() -> Client:
 
 # ── Documents ─────────────────────────────────────────────────────────────────
 
-def create_document(filename: str, file_size_kb: float, summary: str) -> str:
-    sb = get_client()
-    result = sb.table("documents").insert({
+def create_document(filename: str, file_size_kb: float, summary: str, session_id: str) -> str:
+    result = get_client().table("documents").insert({
         "filename": filename,
         "file_size_kb": file_size_kb,
         "summary": summary,
         "chunk_count": 0,
+        "session_id": session_id,
     }).execute()
     return result.data[0]["id"]
 
@@ -36,25 +35,32 @@ def update_chunk_count(document_id: str, count: int) -> None:
     get_client().table("documents").update({"chunk_count": count}).eq("id", document_id).execute()
 
 
-def list_documents() -> List[Dict]:
-    result = get_client().table("documents").select("*").order("created_at", desc=True).execute()
+def list_documents(session_id: str) -> List[Dict]:
+    result = (
+        get_client()
+        .table("documents")
+        .select("*")
+        .eq("session_id", session_id)
+        .order("created_at", desc=True)
+        .execute()
+    )
     return result.data or []
 
 
-def delete_document(document_id: str) -> None:
-    # CASCADE deletes chunks automatically
-    get_client().table("documents").delete().eq("id", document_id).execute()
+def delete_document(document_id: str, session_id: str) -> None:
+    # Scope delete to session so one user cannot delete another's documents
+    get_client().table("documents").delete().eq("id", document_id).eq("session_id", session_id).execute()
 
 
 # ── Chunks ────────────────────────────────────────────────────────────────────
 
-def insert_chunks(chunks: List[Dict]) -> None:
+def insert_chunks(chunks: List[Dict], session_id: str) -> None:
     """
-    Batch-insert chunks with embeddings into Supabase.
-    chunks: list of {document_id, filename, content, chunk_index, embedding: List[float]}
+    Batch-insert chunks with embeddings.
+    Each chunk must have: document_id, filename, content, chunk_index, embedding.
+    Optional: page_number, is_image_chunk.
     """
     sb = get_client()
-    # Supabase expects vector as list — supabase-py handles serialization
     rows = [
         {
             "document_id": c["document_id"],
@@ -63,25 +69,25 @@ def insert_chunks(chunks: List[Dict]) -> None:
             "chunk_index": c["chunk_index"],
             "page_number": c.get("page_number", 1),
             "embedding": c["embedding"],
+            "is_image_chunk": c.get("is_image_chunk", False),
+            "session_id": session_id,
         }
         for c in chunks
     ]
-    # Insert in batches of 100 to avoid request size limits
     batch_size = 100
     for i in range(0, len(rows), batch_size):
-        sb.table("chunks").insert(rows[i : i + batch_size]).execute()
+        sb.table("chunks").insert(rows[i: i + batch_size]).execute()
 
 
 def hybrid_search(
     query_embedding: List[float],
     query_text: str,
+    session_id: str,
     top_k: int = 5,
     threshold: float = 0.25,
     keyword_weight: float = 0.3,
 ) -> List[Dict]:
-    """
-    Call the match_chunks Supabase RPC function (hybrid vector + BM25 search).
-    """
+    """Hybrid vector + BM25 search, scoped to session."""
     sb = get_client()
     result = sb.rpc(
         "match_chunks",
@@ -91,6 +97,7 @@ def hybrid_search(
             "match_count": top_k,
             "match_threshold": threshold,
             "keyword_weight": keyword_weight,
+            "p_session_id": session_id,
         },
     ).execute()
     return result.data or []
@@ -107,6 +114,7 @@ def save_query(
     chunks_used: int,
     top_document: str,
     xai_data: Dict,
+    session_id: str,
 ) -> str:
     result = get_client().table("query_history").insert({
         "question": question,
@@ -117,20 +125,22 @@ def save_query(
         "chunks_used": chunks_used,
         "top_document": top_document,
         "xai_data": xai_data,
+        "session_id": session_id,
     }).execute()
     return result.data[0]["id"]
 
 
-def get_analytics() -> Dict:
-    result = get_client().rpc("get_analytics", {}).execute()
+def get_analytics(session_id: str) -> Dict:
+    result = get_client().rpc("get_analytics", {"p_session_id": session_id}).execute()
     return result.data or {}
 
 
-def get_query_history(limit: int = 20) -> List[Dict]:
+def get_query_history(session_id: str, limit: int = 20) -> List[Dict]:
     result = (
         get_client()
         .table("query_history")
         .select("id, question, answer, confidence_score, grounding_score, processing_time_ms, created_at")
+        .eq("session_id", session_id)
         .order("created_at", desc=True)
         .limit(limit)
         .execute()

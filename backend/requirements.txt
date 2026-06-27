@@ -20,6 +20,10 @@ pdfplumber==0.11.4
 pypdf==5.1.0
 python-docx==1.1.2
 
+# PDF image extraction
+pymupdf==1.25.1
+Pillow==11.1.0
+
 # Numerics
 numpy==2.1.3
 

@@ -22,7 +22,6 @@ class DocumentProcessor:
         raise ValueError(f"Unsupported file type: {ext}")
 
     def extract_summary(self, text: str, max_sentences: int = 5) -> str:
-        """Extractive summary: first N sentences of the document."""
         sentences = re.split(r'(?<=[.!?])\s+', text.strip())
         return " ".join(sentences[:max_sentences])
 
@@ -39,7 +38,6 @@ class DocumentProcessor:
             slen = len(sent)
             if current_len + slen > self.chunk_size and current:
                 chunks.append(self._make(current, document_id, filename, len(chunks)))
-                # Retain overlap sentences
                 overlap: List[str] = []
                 olen = 0
                 for s in reversed(current):
@@ -57,7 +55,7 @@ class DocumentProcessor:
 
         return chunks
 
-    # ── Private helpers ────────────────────────────────────────────────────────
+    # ── Private helpers ───────────────────────────────────────────────────────
 
     def _make(self, sentences: List[str], doc_id: str, filename: str, idx: int) -> dict:
         return {
@@ -65,6 +63,7 @@ class DocumentProcessor:
             "filename": filename,
             "content": " ".join(sentences).strip(),
             "chunk_index": idx,
+            "is_image_chunk": False,
         }
 
     def _clean(self, text: str) -> str:
@@ -73,7 +72,6 @@ class DocumentProcessor:
         return text.strip()
 
     def extract_text_with_pages(self, path: str, filename: str) -> list[tuple[int, str]]:
-        """Returns list of (page_number, text) tuples for PDF files."""
         ext = Path(filename).suffix.lower()
         if ext != ".pdf":
             return [(1, self.extract_text(path, filename))]
@@ -96,11 +94,11 @@ class DocumentProcessor:
             ]
 
     def chunk_text_with_pages(
-        self, page_texts: list[tuple[int, str]], document_id: str, filename: str
+        self, page_texts: list[tuple[int, str]], document_id: str, filename: str,
+        start_index: int = 0,
     ) -> list[dict]:
-        """Chunk with page number metadata tracked per chunk."""
         all_chunks = []
-        chunk_idx = 0
+        chunk_idx = start_index
         for page_num, text in page_texts:
             text = self._clean(text)
             sentences = re.split(r'(?<=[.!?])\s+', text)

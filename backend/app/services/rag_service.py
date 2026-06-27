@@ -2,12 +2,16 @@
 Core RAG orchestration — DocuMind AI
 
 Pipeline:
-  1. Embed query (BGE own model)
-  2. Hybrid search (pgvector + BM25 via Supabase RPC)
-  3. Extractive QA across top chunks (tinyRoberta own model)
+  1. Embed query (BGE)
+  2. Hybrid search (pgvector + BM25 via Supabase RPC) — session-scoped
+  3. Extractive QA across top chunks (tinyRoberta)
   4. XAI: token importance + chunk attribution + grounding score
   5. Persist to query_history
   6. Return enriched QueryResponse
+
+Image pipeline (PDFs only):
+  After text chunking, PyMuPDF extracts images → BLIP captions them →
+  captions are embedded and stored as additional chunks (is_image_chunk=True).
 """
 import uuid
 import time
@@ -15,6 +19,7 @@ import logging
 import tempfile
 import os
 from datetime import datetime, timezone
+from pathlib import Path as _Path
 from typing import List, Optional
 
 from app.core.config import settings
@@ -45,51 +50,65 @@ def _relevance_label(score: float) -> str:
     return "Low"
 
 
-async def upload_document(file_bytes: bytes, filename: str) -> DocumentUploadResponse:
+async def upload_document(
+    file_bytes: bytes, filename: str, session_id: str
+) -> DocumentUploadResponse:
     start = time.perf_counter()
     file_size_kb = len(file_bytes) / 1024
+    is_pdf = _Path(filename).suffix.lower() == ".pdf"
 
     with tempfile.NamedTemporaryFile(
-        suffix=os.path.splitext(filename)[1], delete=False
+        suffix=_Path(filename).suffix, delete=False
     ) as tmp:
         tmp.write(file_bytes)
         tmp_path = tmp.name
 
     try:
-        from pathlib import Path as _Path
-        is_pdf = _Path(filename).suffix.lower() == ".pdf"
-
+        # ── Text extraction ─────────────────────────────────────────────────
         if is_pdf:
             page_texts = _processor.extract_text_with_pages(tmp_path, filename)
             full_text = "\n\n".join(t for _, t in page_texts)
-            raw_chunks = _processor.chunk_text_with_pages(page_texts, "TEMP", filename)
         else:
             full_text = _processor.extract_text(tmp_path, filename)
-            raw_chunks = None
 
         if not full_text.strip():
             raise ValueError("No extractable text found in the document.")
 
         summary = _processor.extract_summary(full_text)
-        document_id = db.create_document(filename, round(file_size_kb, 2), summary)
+        document_id = db.create_document(filename, round(file_size_kb, 2), summary, session_id)
 
-        # Re-chunk with real document_id
-        if is_pdf and raw_chunks is not None:
-            raw_chunks = _processor.chunk_text_with_pages(
-                [(c["page_number"], c["content"]) for c in raw_chunks],
-                document_id, filename,
-            )
+        # ── Text chunking ───────────────────────────────────────────────────
+        if is_pdf:
+            text_chunks = _processor.chunk_text_with_pages(page_texts, document_id, filename)
         else:
-            raw_chunks = _processor.chunk_text(full_text, document_id, filename)
+            text_chunks = _processor.chunk_text(full_text, document_id, filename)
 
-        texts = [c["content"] for c in raw_chunks]
+        # ── Image analysis (PDFs only) ──────────────────────────────────────
+        image_chunks: List[dict] = []
+        if is_pdf:
+            try:
+                from app.services.image_analyzer import build_image_chunks
+                logger.info(f"Extracting images from {filename}…")
+                image_chunks = build_image_chunks(
+                    pdf_path=tmp_path,
+                    document_id=document_id,
+                    filename=filename,
+                    starting_chunk_index=len(text_chunks),
+                )
+            except Exception as e:
+                logger.warning(f"Image analysis skipped: {e}")
+
+        all_chunks = text_chunks + image_chunks
+
+        # ── Embed and persist ───────────────────────────────────────────────
+        texts = [c["content"] for c in all_chunks]
         embeddings = emb.embed_documents(texts)
 
         enriched = [
             {**chunk, "embedding": embeddings[i]}
-            for i, chunk in enumerate(raw_chunks)
+            for i, chunk in enumerate(all_chunks)
         ]
-        db.insert_chunks(enriched)
+        db.insert_chunks(enriched, session_id)
         db.update_chunk_count(document_id, len(enriched))
 
         elapsed = (time.perf_counter() - start) * 1000
@@ -106,25 +125,25 @@ async def upload_document(file_bytes: bytes, filename: str) -> DocumentUploadRes
         os.unlink(tmp_path)
 
 
-async def query(request: QueryRequest) -> QueryResponse:
+async def query(request: QueryRequest, session_id: str) -> QueryResponse:
     start = time.perf_counter()
     question = request.question
 
     # 1. Embed query
     query_emb = emb.embed_query(question)
 
-    # 2. Hybrid search (vector + BM25)
+    # 2. Hybrid search — session-scoped
     raw = db.hybrid_search(
         query_embedding=query_emb,
         query_text=question,
+        session_id=session_id,
         top_k=request.top_k or settings.TOP_K_RESULTS,
         threshold=settings.SIMILARITY_THRESHOLD,
         keyword_weight=settings.KEYWORD_WEIGHT,
     )
 
-    # Attach embedding to each chunk for XAI
     for chunk in raw:
-        chunk["embedding"] = []  # We don't re-fetch embeddings from Supabase for XAI
+        chunk["embedding"] = []
 
     # 3. Extractive QA
     answer, extracted_spans, qa_confidence = qa.synthesize_answer(question, raw)
@@ -156,7 +175,6 @@ async def query(request: QueryRequest) -> QueryResponse:
             )
         )
 
-    # 6. Confidence = weighted blend of QA confidence + top similarity
     top_sim = float(raw[0].get("similarity", 0.0)) if raw else 0.0
     confidence = round(min(1.0, qa_confidence * 0.5 + top_sim * 0.5), 3)
 
@@ -175,7 +193,7 @@ async def query(request: QueryRequest) -> QueryResponse:
 
     elapsed = (time.perf_counter() - start) * 1000
 
-    # 7. Persist
+    # 6. Persist
     query_id = db.save_query(
         question=question,
         answer=answer,
@@ -185,6 +203,7 @@ async def query(request: QueryRequest) -> QueryResponse:
         chunks_used=len(source_chunks),
         top_document=xai_report.top_source,
         xai_data=xai_report.model_dump(),
+        session_id=session_id,
     )
 
     return QueryResponse(
@@ -202,8 +221,8 @@ async def query(request: QueryRequest) -> QueryResponse:
     )
 
 
-def list_documents() -> DocumentListResponse:
-    docs = db.list_documents()
+def list_documents(session_id: str) -> DocumentListResponse:
+    docs = db.list_documents(session_id)
     return DocumentListResponse(
         total=len(docs),
         documents=[
@@ -220,5 +239,5 @@ def list_documents() -> DocumentListResponse:
     )
 
 
-def delete_document(document_id: str) -> None:
-    db.delete_document(document_id)
+def delete_document(document_id: str, session_id: str) -> None:
+    db.delete_document(document_id, session_id)

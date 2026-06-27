@@ -9,9 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-download models so cold starts are fast
+# Pre-download embedding + QA models so cold starts are fast
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5')"
 RUN python -c "from transformers import pipeline; pipeline('question-answering', model='deepset/tinyroberta-squad2')"
+# BLIP image captioning is lazy-loaded on first PDF upload (too large to pre-cache here)
 
 COPY . .
 
