@@ -45,7 +45,7 @@ def root():
 def health():
     from app.services import supabase_service as db
     try:
-        docs = db.list_documents()
+        docs = db.list_documents("global")
         connected = True
         doc_count = len(docs)
     except Exception:
